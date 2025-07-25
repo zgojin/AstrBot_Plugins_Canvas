@@ -1,0 +1,14 @@
+{
+  "gemini_api_key": {
+    "description": "Gemini API 密钥（从 Google AI Studio 获取）",
+    "type": "string",
+    "hint": "前往 https://aistudio.google.com/ 生成 API Key",
+    "obvious_hint": true
+  },
+  "api_base_url": {
+    "description": "Gemini API 基础 URL（可选，默认使用官方地址）",
+    "type": "string",
+    "hint": "如果需要自定义 API 地址，请填写完整 URL",
+    "default": "https://generativeai.googleapis.com"
+  }
+}
