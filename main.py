@@ -10,7 +10,7 @@ from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star, register
 
 
-@register("astrbot_plugin_gemini_img", "长安某", "gemini画图工具", "1.0.1")
+@register("astrbot_plugin_gemini_img", "长安某", "gemini画图工具", "1.1.0")
 class GeminiImageGenerator(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         """Gemini 图片生成与编辑插件初始化"""
