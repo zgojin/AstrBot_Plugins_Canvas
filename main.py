@@ -10,7 +10,7 @@ from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star, register
 
 
-@register("astrbot_plugin_gemini_img", "长安某", "gemini画图工具", "1.0.0")
+@register("astrbot_plugin_gemini_img", "长安某", "gemini画图工具", "1.0.1")
 class GeminiImageGenerator(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         """Gemini 图片生成与编辑插件初始化"""
@@ -18,7 +18,10 @@ class GeminiImageGenerator(Star):
         self.config = config
 
         logger.info(f"插件配置加载成功: {self.config}")
-        logger.info(f"gemini_api_key: {self.config.get('gemini_api_key') is not None}")
+
+        # 读取多密钥配置
+        self.api_keys = self.config.get("gemini_api_keys", [])
+        self.current_key_index = 0
 
         # 初始化图片保存目录
         plugin_dir = os.path.dirname(__file__)
@@ -27,20 +30,32 @@ class GeminiImageGenerator(Star):
             os.makedirs(self.save_dir)
             logger.info(f"已创建图片临时目录: {self.save_dir}")
 
-        # 初始化配置（默认使用官方API地址）
-        self.api_key = self.config.get("gemini_api_key")
+        # 初始化配置
         self.api_base_url = self.config.get(
             "api_base_url", "https://generativelanguage.googleapis.com"
         )
 
-        if not self.api_key:
-            logger.error("未配置 Gemini API 密钥，请在插件配置中填写")
+        if not self.api_keys:
+            logger.error("未配置任何 Gemini API 密钥，请在插件配置中填写")
+
+    def _get_current_api_key(self):
+        """获取当前使用的 API 密钥"""
+        if not self.api_keys:
+            return None
+        return self.api_keys[self.current_key_index]
+
+    def _switch_next_api_key(self):
+        """切换到下一个 API 密钥"""
+        if not self.api_keys:
+            return
+        self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
+        logger.info(f"已切换到下一个 API 密钥（索引：{self.current_key_index}）")
 
     @filter.command("gemini_image", alias={"文生图"})
     async def generate_image(self, event: AstrMessageEvent, prompt: str):
         """根据文本描述生成图片"""
-        if not self.api_key:
-            yield event.plain_result("错误：未配置 Gemini API 密钥")
+        if not self.api_keys:
+            yield event.plain_result("错误：未配置任何 Gemini API 密钥")
             return
 
         if not prompt.strip():
@@ -53,11 +68,11 @@ class GeminiImageGenerator(Star):
 
         try:
             yield event.plain_result("正在生成图片，请稍等...")
-            image_data = await self._generate_image_manually(prompt)
+            image_data = await self._generate_image_with_retry(prompt)
 
             if not image_data:
-                logger.error("生成失败：未获取到图片数据")
-                yield event.plain_result("生成失败：未获取到图片数据")
+                logger.error("生成失败：所有API密钥均尝试完毕")
+                yield event.plain_result("生成失败：所有API密钥均尝试失败")
                 return
 
             # 保存图片
@@ -88,6 +103,10 @@ class GeminiImageGenerator(Star):
     @filter.command("gemini_edit", alias={"图编辑"})
     async def edit_image(self, event: AstrMessageEvent, prompt: str):
         """仅支持：引用图片（长按回复）后发送指令编辑图片"""
+        if not self.api_keys:
+            yield event.plain_result("错误：未配置任何 Gemini API 密钥")
+            return
+
         # 复用图片提取逻辑（和工具调用共用）
         image_path = await self._extract_image_from_reply(event)
         if not image_path:
@@ -105,8 +124,8 @@ class GeminiImageGenerator(Star):
         Args:
             prompt(string): 编辑描述（例如：把猫咪改成黑色、将天空改为蓝色）
         """
-        if not self.api_key:
-            yield event.plain_result("错误：未配置 Gemini API 密钥")
+        if not self.api_keys:
+            yield event.plain_result("错误：未配置任何 Gemini API 密钥")
             return
 
         if not prompt.strip():
@@ -183,11 +202,11 @@ class GeminiImageGenerator(Star):
         try:
             yield event.plain_result("正在编辑图片，请稍等...")
 
-            # 调用编辑方法
-            image_data = await self._edit_image_manually(prompt, image_path)
+            # 调用带重试的编辑方法
+            image_data = await self._edit_image_with_retry(prompt, image_path)
 
             if not image_data:
-                yield event.plain_result("编辑失败：未获取到图片数据")
+                yield event.plain_result("编辑失败：所有API密钥均尝试失败")
                 return
 
             # 保存并发送编辑后的图片
@@ -218,7 +237,59 @@ class GeminiImageGenerator(Star):
                 except Exception as e:
                     logger.warning(f"删除编辑图失败：{str(e)}")
 
-    async def _edit_image_manually(self, prompt, image_path):
+    async def _edit_image_with_retry(self, prompt, image_path):
+        """带重试逻辑的图片编辑方法"""
+        max_attempts = len(self.api_keys)
+        attempts = 0
+
+        while attempts < max_attempts:
+            current_key = self._get_current_api_key()
+            if not current_key:
+                break
+
+            logger.info(
+                f"尝试编辑图片（密钥索引：{self.current_key_index}，尝试次数：{attempts + 1}/{max_attempts}）"
+            )
+
+            try:
+                return await self._edit_image_manually(prompt, image_path, current_key)
+            except Exception as e:
+                attempts += 1
+                logger.error(f"第{attempts}次尝试失败：{str(e)}")
+                if attempts < max_attempts:
+                    self._switch_next_api_key()
+                else:
+                    logger.error("所有API密钥均尝试失败")
+
+        return None
+
+    async def _generate_image_with_retry(self, prompt):
+        """带重试逻辑的图片生成方法"""
+        max_attempts = len(self.api_keys)
+        attempts = 0
+
+        while attempts < max_attempts:
+            current_key = self._get_current_api_key()
+            if not current_key:
+                break
+
+            logger.info(
+                f"尝试生成图片（密钥索引：{self.current_key_index}，尝试次数：{attempts + 1}/{max_attempts}）"
+            )
+
+            try:
+                return await self._generate_image_manually(prompt, current_key)
+            except Exception as e:
+                attempts += 1
+                logger.error(f"第{attempts}次尝试失败：{str(e)}")
+                if attempts < max_attempts:
+                    self._switch_next_api_key()
+                else:
+                    logger.error("所有API密钥均尝试失败")
+
+        return None
+
+    async def _edit_image_manually(self, prompt, image_path, api_key):
         """使用手动请求编辑图片"""
         model_name = "gemini-2.0-flash-preview-image-generation"
 
@@ -230,7 +301,7 @@ class GeminiImageGenerator(Star):
             base_url = base_url[:-1]
 
         endpoint = (
-            f"{base_url}/v1beta/models/{model_name}:generateContent?key={self.api_key}"
+            f"{base_url}/v1beta/models/{model_name}:generateContent?key={api_key}"
         )
         logger.info(f"手动请求地址：{endpoint}")
 
@@ -290,7 +361,7 @@ class GeminiImageGenerator(Star):
             raise Exception("编辑图片成功，但未获取到图片数据")
         return image_data
 
-    async def _generate_image_manually(self, prompt):
+    async def _generate_image_manually(self, prompt, api_key):
         """使用手动请求生成图片"""
         model_name = "gemini-2.0-flash-preview-image-generation"
 
@@ -301,7 +372,7 @@ class GeminiImageGenerator(Star):
             base_url = base_url[:-1]
 
         endpoint = (
-            f"{base_url}/v1beta/models/{model_name}:generateContent?key={self.api_key}"
+            f"{base_url}/v1beta/models/{model_name}:generateContent?key={api_key}"
         )
         headers = {"Content-Type": "application/json"}
 
