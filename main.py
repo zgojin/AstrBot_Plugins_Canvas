@@ -2,15 +2,15 @@ import base64
 import os
 import uuid
 
+import aiohttp  # 新增：异步HTTP客户端库
 import astrbot.api.message_components as Comp
-import requests
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star, register
 
 
-@register("astrbot_plugin_gemini_img", "长安某", "gemini画图工具", "1.1.0")
+@register("astrbot_plugin_gemini_img", "长安某", "gemini画图工具", "1.2.0")
 class GeminiImageGenerator(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         """Gemini 图片生成与编辑插件初始化"""
@@ -102,12 +102,12 @@ class GeminiImageGenerator(Star):
 
     @filter.command("gemini_edit", alias={"图编辑"})
     async def edit_image(self, event: AstrMessageEvent, prompt: str):
-        """仅支持：引用图片（长按回复）后发送指令编辑图片"""
+        """仅支持：引用图片后发送指令编辑图片"""
         if not self.api_keys:
             yield event.plain_result("错误：未配置任何 Gemini API 密钥")
             return
 
-        # 复用图片提取逻辑（和工具调用共用）
+        # 图片提取逻辑
         image_path = await self._extract_image_from_reply(event)
         if not image_path:
             yield event.plain_result("未找到图片，请先长按图片发送回复后重试")
@@ -119,10 +119,10 @@ class GeminiImageGenerator(Star):
 
     @filter.llm_tool(name="edit_image")
     async def edit_image_tool(self, event: AstrMessageEvent, prompt: str):
-        """编辑现有图片。使用方式：长按图片后点击“回复”，在回复框输入编辑指令（例如：把猫咪改成黑色）。
+        """编辑现有图片。当你需要编辑图片时，请使用此工具。
 
         Args:
-            prompt(string): 编辑描述（例如：把猫咪改成黑色、将天空改为蓝色）
+            prompt(string): 编辑描述（例如：把猫咪改成黑色）
         """
         if not self.api_keys:
             yield event.plain_result("错误：未配置任何 Gemini API 密钥")
@@ -144,10 +144,10 @@ class GeminiImageGenerator(Star):
 
     @filter.llm_tool(name="generate_image")
     async def generate_image_tool(self, event: AstrMessageEvent, prompt: str):
-        """根据文本描述生成图片。
+        """根据文本描述生成图片，当你需要生成图片时请使用此工具。
 
         Args:
-            prompt(string): 图片描述文本（例如：一只戴帽子的猫在月球上）
+            prompt(string): 图片描述文本（例如：画只猫）
         """
         async for result in self.generate_image(event, prompt):
             yield result
@@ -157,8 +157,6 @@ class GeminiImageGenerator(Star):
         """从回复消息中提取图片并返回本地路径"""
         try:
             message_components = event.message_obj.message
-
-            # 寻找Reply（回复）组件（用户长按图片后的“回复”操作会生成）
             reply_component = None
             for comp in message_components:
                 if isinstance(comp, Comp.Reply):
@@ -193,11 +191,11 @@ class GeminiImageGenerator(Star):
             logger.error(f"提取图片失败: {str(e)}", exc_info=True)
             return None
 
-    # 统一的图片编辑处理逻辑（指令和工具调用共用）
+    # 统一的图片编辑处理逻辑
     async def _process_image_edit(
         self, event: AstrMessageEvent, prompt: str, image_path: str
     ):
-        """处理图片编辑的核心逻辑（复用给指令和工具调用）"""
+        """处理图片编辑的核心逻辑"""
         save_path = None
         try:
             yield event.plain_result("正在编辑图片，请稍等...")
@@ -290,7 +288,7 @@ class GeminiImageGenerator(Star):
         return None
 
     async def _edit_image_manually(self, prompt, image_path, api_key):
-        """使用手动请求编辑图片"""
+        """使用异步请求编辑图片"""
         model_name = "gemini-2.0-flash-preview-image-generation"
 
         # 修正API地址格式
@@ -303,7 +301,7 @@ class GeminiImageGenerator(Star):
         endpoint = (
             f"{base_url}/v1beta/models/{model_name}:generateContent?key={api_key}"
         )
-        logger.info(f"手动请求地址：{endpoint}")
+        logger.info(f"异步请求地址：{endpoint}")
 
         headers = {"Content-Type": "application/json"}
 
@@ -337,16 +335,26 @@ class GeminiImageGenerator(Star):
             },
         }
 
-        # 发送请求
-        response = requests.post(endpoint, headers=headers, json=payload)
-        if response.status_code != 200:
-            logger.error(
-                f"API编辑请求失败: HTTP {response.status_code}, 响应: {response.text}"
-            )
-            response.raise_for_status()
+        # 异步发送请求
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(
+                    url=endpoint, json=payload, headers=headers
+                ) as response:
+                    if response.status != 200:
+                        response_text = await response.text()  # 异步读取响应文本
+                        logger.error(
+                            f"API编辑请求失败: HTTP {response.status}, 响应: {response_text}"
+                        )
+                        response.raise_for_status()
 
-        # 解析响应
-        data = response.json()
+                    # 异步解析JSON响应
+                    data = await response.json()
+            except Exception as e:
+                logger.error(f"异步编辑请求失败: {str(e)}")
+                raise  # 传递异常触发重试
+
+        # 解析图片数据
         image_data = None
         if "candidates" in data and len(data["candidates"]) > 0:
             for part in data["candidates"][0]["content"]["parts"]:
@@ -362,7 +370,7 @@ class GeminiImageGenerator(Star):
         return image_data
 
     async def _generate_image_manually(self, prompt, api_key):
-        """使用手动请求生成图片"""
+        """使用异步请求生成图片（替换同步请求）"""
         model_name = "gemini-2.0-flash-preview-image-generation"
 
         base_url = self.api_base_url.strip()
@@ -374,6 +382,8 @@ class GeminiImageGenerator(Star):
         endpoint = (
             f"{base_url}/v1beta/models/{model_name}:generateContent?key={api_key}"
         )
+        logger.info(f"异步请求地址：{endpoint}")
+
         headers = {"Content-Type": "application/json"}
 
         payload = {
@@ -387,14 +397,26 @@ class GeminiImageGenerator(Star):
             },
         }
 
-        response = requests.post(endpoint, headers=headers, json=payload)
-        if response.status_code != 200:
-            logger.error(
-                f"API请求失败: HTTP {response.status_code}, 响应: {response.text}"
-            )
-            response.raise_for_status()
+        # 异步发送请求
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(
+                    url=endpoint, json=payload, headers=headers
+                ) as response:
+                    if response.status != 200:
+                        response_text = await response.text()  # 异步读取响应文本
+                        logger.error(
+                            f"API生成请求失败: HTTP {response.status}, 响应: {response_text}"
+                        )
+                        response.raise_for_status()
 
-        data = response.json()
+                    # 异步解析JSON响应
+                    data = await response.json()
+            except Exception as e:
+                logger.error(f"异步生成请求失败: {str(e)}")
+                raise  # 传递异常触发重试
+
+        # 解析图片数据
         image_data = None
         if "candidates" in data and len(data["candidates"]) > 0:
             for part in data["candidates"][0]["content"]["parts"]:
