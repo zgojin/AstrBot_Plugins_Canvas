@@ -1,8 +1,9 @@
 import base64
 import os
 import uuid
+import re  # 修改：新增：导入re模块用于正则表达式匹配
 
-import aiohttp  # 新增：异步HTTP客户端库
+import aiohttp
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -67,7 +68,8 @@ class GeminiImageGenerator(Star):
         save_path = None
 
         try:
-            yield event.plain_result("正在生成图片，请稍等...")
+            # 修改：删除：移除“正在生成图片，请稍等...”的提示
+            # yield event.plain_result("正在生成图片，请稍等...")
             image_data = await self._generate_image_with_retry(prompt)
 
             if not image_data:
@@ -198,7 +200,8 @@ class GeminiImageGenerator(Star):
         """处理图片编辑的核心逻辑"""
         save_path = None
         try:
-            yield event.plain_result("正在编辑图片，请稍等...")
+            # 修改：删除：移除“正在编辑图片，请稍等...”的提示
+            # yield event.plain_result("正在编辑图片，请稍等...")
 
             # 调用带重试的编辑方法
             image_data = await self._edit_image_with_retry(prompt, image_path)
@@ -233,7 +236,7 @@ class GeminiImageGenerator(Star):
                     os.remove(save_path)
                     logger.info(f"已删除编辑图临时文件：{save_path}")
                 except Exception as e:
-                    logger.warning(f"删除编辑图失败：{str(e)}")
+                    logger.warning(f"删除编辑图失败: {str(e)}")
 
     async def _edit_image_with_retry(self, prompt, image_path):
         """带重试逻辑的图片编辑方法"""
@@ -286,6 +289,75 @@ class GeminiImageGenerator(Star):
                     logger.error("所有API密钥均尝试失败")
 
         return None
+
+    # 修改：新增：辅助函数，用于从不同文本格式中提取图片URL
+    def _extract_image_url_from_text(self, text_content: str) -> str | None:
+        """
+        从文本内容中提取图片URL，支持Markdown、HTML、BBCode和直接URL格式。
+        优先级：Markdown -> HTML -> BBCode -> 直接URL
+        """
+        
+        # 1. Markdown: ![alt text](url)
+        # 修改：修改逻辑：Markdown图片链接正则表达式，更精确匹配URL
+        markdown_match = re.search(r'!\[.*?\]\((https?://[^\s\)]+)\)', text_content)
+        if markdown_match:
+            url = markdown_match.group(1)
+            if any(url.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
+                logger.debug(f"Extracted Markdown URL: {url}")
+                return url
+
+        # 2. HTML <img> tag: <img src="url">
+        # 修改：新增：HTML图片链接正则表达式
+        html_match = re.search(r'<img[^>]*src=["\'](https?://[^"\'\s]+?)["\'][^>]*>', text_content, re.IGNORECASE)
+        if html_match:
+            url = html_match.group(1)
+            if any(url.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
+                logger.debug(f"Extracted HTML URL: {url}")
+                return url
+
+        # 3. BBCode [img] tag: [img]url[/img]
+        # 修改：新增：BBCode图片链接正则表达式
+        bbcode_match = re.search(r'\[img\](https?://[^\[\]\s]+?)\[/img\]', text_content, re.IGNORECASE)
+        if bbcode_match:
+            url = bbcode_match.group(1)
+            if any(url.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
+                logger.debug(f"Extracted BBCode URL: {url}")
+                return url
+
+        # 4. Direct URL ending with image extension
+        # 修改：修改逻辑：直接URL正则表达式，确保是图片文件
+        direct_url_match = re.search(r'(https?://\S+\.(?:png|jpg|jpeg|gif|webp))', text_content, re.IGNORECASE)
+        if direct_url_match:
+            url = direct_url_match.group(1)
+            logger.debug(f"Extracted direct URL: {url}")
+            return url
+
+        return None
+
+    # 修改：新增：从URL下载图片的方法
+    async def _download_image_from_url(self, url: str, save_path: str):
+        """
+        从给定的URL下载图片并保存到指定路径。
+        """
+        logger.info(f"尝试从URL下载图片: {url} 到 {save_path}")
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url) as response:
+                    response.raise_for_status()  # 检查HTTP状态码，如果不是2xx则抛出异常
+                    with open(save_path, "wb") as f:
+                        # 异步写入文件，分块读取以处理大文件
+                        while True:
+                            chunk = await response.content.read(1024)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                    logger.info(f"图片已成功从URL下载并保存到: {save_path}")
+            except aiohttp.ClientError as e:
+                logger.error(f"下载图片失败 (aiohttp error): {e}")
+                raise
+            except Exception as e:
+                logger.error(f"下载图片时发生未知错误: {e}")
+                raise
 
     async def _edit_image_manually(self, prompt, image_path, api_key):
         """使用异步请求编辑图片"""
@@ -350,12 +422,17 @@ class GeminiImageGenerator(Star):
 
                     # 异步解析JSON响应
                     data = await response.json()
+                    # 修改：新增：记录完整的API响应数据，以便调试
+                    logger.debug(f"Gemini API edit response data: {data}")
+
             except Exception as e:
                 logger.error(f"异步编辑请求失败: {str(e)}")
                 raise  # 传递异常触发重试
 
-        # 解析图片数据
+        # 解析图片数据或URL
         image_data = None
+        image_url = None
+
         if "candidates" in data and len(data["candidates"]) > 0:
             for part in data["candidates"][0]["content"]["parts"]:
                 if "inlineData" in part and "data" in part["inlineData"]:
@@ -363,11 +440,43 @@ class GeminiImageGenerator(Star):
                         part["inlineData"]["data"].replace("\n", "").replace("\r", "")
                     )
                     image_data = base64.b64decode(base64_str)
+                    logger.info("Successfully extracted image data from inlineData (edit).")
                     break
+                # 修改：修改逻辑：调用辅助函数识别多种格式的图片URL
+                elif "text" in part:
+                    extracted_url = self._extract_image_url_from_text(part["text"])
+                    if extracted_url:
+                        image_url = extracted_url
+                        logger.info(f"Found image URL in text part (edit): {image_url}")
+                        break
+            
+            # 修改：修改逻辑：如果未找到inlineData或可识别的图片URL，记录警告
+            if not image_data and not image_url:
+                logger.warning(f"Gemini API edit response missing 'inlineData' or recognizable image URL: {data}")
+        else:
+            # 修改：修改逻辑：如果未找到candidates或content parts，记录警告
+            logger.warning(f"Gemini API edit response missing 'candidates' or content parts for image data: {data}")
 
-        if not image_data:
-            raise Exception("编辑图片成功，但未获取到图片数据")
-        return image_data
+        if image_data:
+            return image_data
+        elif image_url:
+            # 如果找到URL，下载图片并返回其字节数据
+            temp_download_path = os.path.join(self.save_dir, f"downloaded_edit_{uuid.uuid4()}.png")
+            try:
+                await self._download_image_from_url(image_url, temp_download_path)
+                with open(temp_download_path, "rb") as f:
+                    downloaded_image_bytes = f.read()
+                logger.info(f"Successfully downloaded image from URL (edit): {image_url}")
+                return downloaded_image_bytes
+            except Exception as download_e:
+                logger.error(f"Failed to download image from URL {image_url} (edit): {download_e}")
+                raise Exception(f"编辑图片成功，但从URL下载图片失败: {download_e}")
+            finally:
+                if os.path.exists(temp_download_path):
+                    os.remove(temp_download_path)
+                    logger.info(f"Cleaned up temporary downloaded file (edit): {temp_download_path}")
+        else:
+            raise Exception("编辑图片成功，但未获取到图片数据或图片URL")
 
     async def _generate_image_manually(self, prompt, api_key):
         """使用异步请求生成图片（替换同步请求）"""
@@ -412,12 +521,17 @@ class GeminiImageGenerator(Star):
 
                     # 异步解析JSON响应
                     data = await response.json()
+                    # 修改：新增：记录完整的API响应数据，以便调试
+                    logger.debug(f"Gemini API generate response data: {data}")
+
             except Exception as e:
                 logger.error(f"异步生成请求失败: {str(e)}")
                 raise  # 传递异常触发重试
 
-        # 解析图片数据
+        # 解析图片数据或URL
         image_data = None
+        image_url = None
+
         if "candidates" in data and len(data["candidates"]) > 0:
             for part in data["candidates"][0]["content"]["parts"]:
                 if "inlineData" in part and "data" in part["inlineData"]:
@@ -425,11 +539,43 @@ class GeminiImageGenerator(Star):
                         part["inlineData"]["data"].replace("\n", "").replace("\r", "")
                     )
                     image_data = base64.b64decode(base64_str)
+                    logger.info("Successfully extracted image data from inlineData (generate).")
                     break
+                # 修改：修改逻辑：调用辅助函数识别多种格式的图片URL
+                elif "text" in part:
+                    extracted_url = self._extract_image_url_from_text(part["text"])
+                    if extracted_url:
+                        image_url = extracted_url
+                        logger.info(f"Found image URL in text part (generate): {image_url}")
+                        break
+            
+            # 修改：修改逻辑：如果未找到inlineData或可识别的图片URL，记录警告
+            if not image_data and not image_url:
+                logger.warning(f"Gemini API generate response missing 'inlineData' or recognizable image URL: {data}")
+        else:
+            # 修改：修改逻辑：如果未找到candidates或content parts，记录警告
+            logger.warning(f"Gemini API generate response missing 'candidates' or content parts for image data: {data}")
 
-        if not image_data:
-            raise Exception("生成图片成功，但未获取到图片数据")
-        return image_data
+        if image_data:
+            return image_data
+        elif image_url:
+            # 如果找到URL，下载图片并返回其字节数据
+            temp_download_path = os.path.join(self.save_dir, f"downloaded_gen_{uuid.uuid4()}.png")
+            try:
+                await self._download_image_from_url(image_url, temp_download_path)
+                with open(temp_download_path, "rb") as f:
+                    downloaded_image_bytes = f.read()
+                logger.info(f"Successfully downloaded image from URL (generate): {image_url}")
+                return downloaded_image_bytes
+            except Exception as download_e:
+                logger.error(f"Failed to download image from URL {image_url} (generate): {download_e}")
+                raise Exception(f"生成图片成功，但从URL下载图片失败: {download_e}")
+            finally:
+                if os.path.exists(temp_download_path):
+                    os.remove(temp_download_path)
+                    logger.info(f"Cleaned up temporary downloaded file (generate): {temp_download_path}")
+        else:
+            raise Exception("生成图片成功，但未获取到图片数据或图片URL")
 
     async def terminate(self):
         """插件卸载时清理临时目录"""
@@ -442,3 +588,4 @@ class GeminiImageGenerator(Star):
             except Exception as e:
                 logger.warning(f"清理临时目录失败: {str(e)}")
         logger.info("Gemini 文生图插件已停用")
+
