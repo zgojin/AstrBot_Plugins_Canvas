@@ -2,7 +2,7 @@ import base64
 import os
 import uuid
 
-import aiohttp  # 新增：异步HTTP客户端库
+import aiohttp
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
