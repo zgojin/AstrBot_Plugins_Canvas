@@ -1,4 +1,3 @@
-# 因gemini2.0画图模型弃用，该插件已失效
 
 
 ## Gemini Canvas 插件说明文档
